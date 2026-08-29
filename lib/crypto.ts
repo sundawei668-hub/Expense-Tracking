@@ -3,7 +3,7 @@ import type { TransactionRecord } from './db';
 const ACCOUNT_STORAGE_KEY = 'yibenzhang-local-account-v2';
 const ACCOUNT_VERSION = 2;
 const BACKUP_VERSION = 2;
-const DEFAULT_ITERATIONS = 310_000;
+const DEFAULT_ITERATIONS = 600_000;
 const CHECK_TEXT = 'yi-ben-zhang-unlocked-v2';
 const BACKUP_AAD = 'yi-ben-zhang-backup-v2';
 

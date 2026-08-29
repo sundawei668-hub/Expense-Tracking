@@ -1,4 +1,4 @@
-const CACHE_NAME = 'yi-ben-zhang-v3';
+const CACHE_NAME = 'yi-ben-zhang-v4';
 const BASE_URL = new URL('./', self.location.href);
 const BASE_PATH = BASE_URL.pathname;
 const STATIC_FILES = ['manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'og.png']
@@ -51,17 +51,23 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  const networkUpdate = (async () => {
+    const response = await fetch(event.request);
+    if (response.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(event.request, response.clone());
+    }
+    return response;
+  })();
+
+  event.waitUntil(networkUpdate.then(() => undefined).catch(() => undefined));
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const cached = await cache.match(event.request);
     if (cached) return cached;
 
     try {
-      const response = await fetch(event.request);
-      if (response.ok) {
-        event.waitUntil(cache.put(event.request, response.clone()));
-      }
-      return response;
+      return await networkUpdate;
     } catch {
       return Response.error();
     }

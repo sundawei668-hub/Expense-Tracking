@@ -321,7 +321,11 @@ export default function Home() {
   };
 
   const exportCsv = async () => {
-    const quote = (value: string | number) => `"${String(value).replaceAll('"', '""')}"`;
+    const quote = (value: string | number) => {
+      const text = String(value);
+      const safeText = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text;
+      return `"${safeText.replaceAll('"', '""')}"`;
+    };
     const header = ['日期', '类型', '金额', '分类', '账户', '备注', '创建时间'];
     try {
       const latestRecords = await getAllRecords();
