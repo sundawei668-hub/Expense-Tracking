@@ -1,0 +1,26 @@
+{
+  "name": "一本账｜我的离线记账本",
+  "short_name": "一本账",
+  "description": "无广告、无会员、数据只属于你的个人离线记账工具。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f4f1e9",
+  "theme_color": "#1e6748",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
