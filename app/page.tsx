@@ -2,11 +2,14 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  clearRememberedSession,
   clearRecords,
   getAllRecords,
+  getRememberedSession,
   lockDatabase,
   removeRecord,
   replaceRecords,
+  saveRememberedSession,
   saveRecord,
   TransactionRecord,
   TransactionType,
@@ -21,6 +24,7 @@ import {
   isEncryptedBackupFile,
   saveLocalAccount,
   verifyLocalAccount,
+  verifyLocalAccountKey,
 } from '@/lib/crypto';
 
 type Tab = 'add' | 'records' | 'stats' | 'settings';
@@ -33,7 +37,7 @@ interface InstallPromptEvent extends Event {
 
 const expenseCategories = [
   ['餐饮', '🥢'], ['交通', '🚇'], ['购物', '🛍'], ['居家', '⌂'],
-  ['娱乐', '♪'], ['医疗', '✚'], ['教育', '书'], ['人情', '礼'], ['其他', '•••'],
+  ['娱乐', '♪'], ['医疗', '✚'], ['教育', '书'], ['子女', '子'], ['其他', '•••'],
 ] as const;
 
 const incomeCategories = [
@@ -41,6 +45,7 @@ const incomeCategories = [
 ] as const;
 
 const accounts = ['微信支付', '支付宝', '银行卡', '现金', '信用卡'];
+const REMEMBER_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
 const categoryIcon = new Map<string, string>([...expenseCategories, ...incomeCategories]);
 
@@ -132,13 +137,36 @@ export default function Home() {
   const refreshRecords = async () => setRecords(await getAllRecords());
 
   useEffect(() => {
-    const accountConfig = getLocalAccount();
-    if (accountConfig) {
+    let cancelled = false;
+    const initializeAccount = async () => {
+      const accountConfig = getLocalAccount();
+      if (!accountConfig) {
+        if (!cancelled) setAuthState('setup');
+        return;
+      }
+
       setLoginName(accountConfig.username);
-      setAuthState('locked');
-    } else {
-      setAuthState('setup');
-    }
+      try {
+        const remembered = await getRememberedSession();
+        if (
+          remembered
+          && remembered.username === accountConfig.username
+          && remembered.expiresAt > Date.now()
+          && await verifyLocalAccountKey(accountConfig, remembered.key)
+        ) {
+          await unlockDatabase(remembered.key);
+          if (!cancelled) setAuthState('unlocked');
+          return;
+        }
+        if (remembered) await clearRememberedSession();
+      } catch {
+        await clearRememberedSession().catch(() => undefined);
+      }
+      if (!cancelled) setAuthState('locked');
+    };
+
+    void initializeAccount();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -200,6 +228,8 @@ export default function Home() {
           setAuthState('locked');
           throw error;
         }
+        await saveRememberedSession(config.username, key, Date.now() + REMEMBER_DURATION_MS)
+          .catch(() => showToast('本机不支持30天免登录'));
       } else {
         const key = await verifyLocalAccount(normalizedName, loginPassword);
         if (!key) {
@@ -207,6 +237,8 @@ export default function Home() {
           return;
         }
         await unlockDatabase(key);
+        await saveRememberedSession(normalizedName, key, Date.now() + REMEMBER_DURATION_MS)
+          .catch(() => showToast('本机不支持30天免登录'));
       }
       setLoginPassword('');
       setConfirmPassword('');
@@ -218,7 +250,13 @@ export default function Home() {
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await clearRememberedSession();
+    } catch {
+      showToast('退出失败，请稍后重试');
+      return;
+    }
     lockDatabase();
     setRecords([]);
     setReady(false);
@@ -480,7 +518,7 @@ export default function Home() {
             <button type="submit" disabled={loginBusy}>{loginBusy ? '正在处理…' : isSetup ? '创建并加密账本' : '解锁账本'}</button>
           </form>
           {isSetup && <p className="setup-warning">请把密码保存在安全位置。密码不会上传，也无法找回；忘记密码将无法恢复账目。</p>}
-          <p className="login-privacy">AES-256 本地加密 · 密码不会上传 · 关闭后自动锁定</p>
+          <p className="login-privacy">AES-256 本地加密 · 密码不会上传 · 本机保持解锁30天</p>
         </section>
       </main>
     );
@@ -542,7 +580,7 @@ export default function Home() {
                       className={category === name ? 'category active' : 'category'}
                       onClick={() => setCategory(name)}
                     >
-                      <span>{icon}</span>{name}
+                      <span className={name === '其他' ? 'more-dots' : undefined}>{icon}</span>{name}
                     </button>
                   ))}
                 </div>
@@ -662,9 +700,9 @@ export default function Home() {
               </div>
               <div className="setting-group">
                 <h3>账号</h3>
-                <button onClick={logout}><span>退</span><div><b>退出登录</b><small>下次打开需要重新输入密码</small></div><em>›</em></button>
+                <button onClick={logout}><span>退</span><div><b>退出登录</b><small>立即锁定并清除30天免登录</small></div><em>›</em></button>
               </div>
-              <p className="version-note">一本账 1.2 · 本地加密 · 无广告 · 无追踪</p>
+              <p className="version-note">一本账 1.3 · 本地加密 · 无广告 · 无追踪</p>
             </section>
           )}
         </div>

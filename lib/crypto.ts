@@ -150,10 +150,18 @@ export async function verifyLocalAccount(username: string, password: string) {
   if (!config || username.trim().toLowerCase() !== config.username) return null;
   try {
     const key = await deriveKey(password, base64ToBytes(config.salt), config.iterations);
-    const check = await decryptText(key, config.check, config.username);
-    return check === CHECK_TEXT ? key : null;
+    return await verifyLocalAccountKey(config, key) ? key : null;
   } catch {
     return null;
+  }
+}
+
+export async function verifyLocalAccountKey(config: LocalAccountConfig, key: CryptoKey) {
+  try {
+    const check = await decryptText(key, config.check, config.username);
+    return check === CHECK_TEXT;
+  } catch {
+    return false;
   }
 }
 

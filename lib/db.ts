@@ -22,10 +22,19 @@ export interface TransactionRecord {
 }
 
 const DB_NAME = 'yi-ben-zhang';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'transactions';
+const SESSION_STORE_NAME = 'remembered-session';
+const SESSION_ID = 'current';
 
 type StoredRecord = TransactionRecord | EncryptedStoredRecord;
+
+export interface RememberedSession {
+  id: typeof SESSION_ID;
+  username: string;
+  key: CryptoKey;
+  expiresAt: number;
+}
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -38,6 +47,9 @@ function openDatabase(): Promise<IDBDatabase> {
         store.createIndex('date', 'date');
         store.createIndex('type', 'type');
         store.createIndex('category', 'category');
+      }
+      if (!db.objectStoreNames.contains(SESSION_STORE_NAME)) {
+        db.createObjectStore(SESSION_STORE_NAME, { keyPath: 'id' });
       }
     };
 
@@ -117,6 +129,51 @@ export async function unlockDatabase(key: CryptoKey): Promise<void> {
 
 export function lockDatabase() {
   clearEncryptionKey();
+}
+
+export async function getRememberedSession(): Promise<RememberedSession | null> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(SESSION_STORE_NAME, 'readonly');
+    const request = transaction.objectStore(SESSION_STORE_NAME).get(SESSION_ID);
+    request.onsuccess = () => {
+      const value = request.result as Partial<RememberedSession> | undefined;
+      db.close();
+      if (
+        value?.id === SESSION_ID
+        && typeof value.username === 'string'
+        && typeof value.expiresAt === 'number'
+        && value.key
+      ) {
+        resolve(value as RememberedSession);
+      } else {
+        resolve(null);
+      }
+    };
+    request.onerror = () => { db.close(); reject(request.error); };
+  });
+}
+
+export async function saveRememberedSession(username: string, key: CryptoKey, expiresAt: number): Promise<void> {
+  const db = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(SESSION_STORE_NAME, 'readwrite');
+    transaction.objectStore(SESSION_STORE_NAME).put({ id: SESSION_ID, username, key, expiresAt });
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error('IndexedDB transaction aborted')); };
+  });
+}
+
+export async function clearRememberedSession(): Promise<void> {
+  const db = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(SESSION_STORE_NAME, 'readwrite');
+    transaction.objectStore(SESSION_STORE_NAME).delete(SESSION_ID);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error('IndexedDB transaction aborted')); };
+  });
 }
 
 export async function getAllRecords(): Promise<TransactionRecord[]> {
