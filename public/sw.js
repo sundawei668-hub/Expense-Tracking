@@ -1,4 +1,4 @@
-const CACHE_NAME = 'yi-ben-zhang-v4';
+const CACHE_NAME = 'yi-ben-zhang-v5';
 const BASE_URL = new URL('./', self.location.href);
 const BASE_PATH = BASE_URL.pathname;
 const STATIC_FILES = ['manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'og.png']

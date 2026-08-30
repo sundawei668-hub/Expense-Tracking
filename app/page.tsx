@@ -990,6 +990,7 @@ export default function Home() {
                 ) : (
                   <div className="install-tip"><b>添加到桌面</b><p>在手机浏览器菜单中选择“添加到主屏幕”或“安装应用”。</p></div>
                 )}
+                <div className="install-tip"><b>华为手机需要重新发送到桌面</b><p>新版桌面图标会在华为浏览器窗口中打开，才能正常弹出 CSV 下载。请删除旧图标，再从浏览器重新“发送到桌面”；删除图标不会删除账目。</p></div>
               </div>
 
               <div className="setting-group danger-zone">
@@ -1000,7 +1001,7 @@ export default function Home() {
                 <h3>账号</h3>
                 <button onClick={logout}><span>退</span><div><b>退出登录</b><small>立即锁定并清除30天免登录</small></div><em>›</em></button>
               </div>
-              <p className="version-note">一本账 1.6 · 本地加密 · 华为 CSV 下载修复 · 无广告 · 无追踪</p>
+              <p className="version-note">一本账 1.7 · 本地加密 · 桌面入口支持下载 · 无广告 · 无追踪</p>
             </section>
           )}
         </div>
