@@ -22,10 +22,12 @@ export interface TransactionRecord {
 }
 
 const DB_NAME = 'yi-ben-zhang';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = 'transactions';
 const SESSION_STORE_NAME = 'remembered-session';
 const SESSION_ID = 'current';
+const SETTINGS_STORE_NAME = 'app-settings';
+const AUTO_CSV_SETTING_ID = 'auto-csv-file';
 
 type StoredRecord = TransactionRecord | EncryptedStoredRecord;
 
@@ -34,6 +36,20 @@ export interface RememberedSession {
   username: string;
   key: CryptoKey;
   expiresAt: number;
+}
+
+export interface WritableFileHandle {
+  kind: 'file';
+  name: string;
+  createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+  queryPermission: (options: { mode: 'readwrite' }) => Promise<PermissionState>;
+  requestPermission: (options: { mode: 'readwrite' }) => Promise<PermissionState>;
+}
+
+export interface AutoCsvSetting {
+  id: typeof AUTO_CSV_SETTING_ID;
+  handle: WritableFileHandle;
+  lastSavedAt: string | null;
 }
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -50,6 +66,9 @@ function openDatabase(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(SESSION_STORE_NAME)) {
         db.createObjectStore(SESSION_STORE_NAME, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(SETTINGS_STORE_NAME)) {
+        db.createObjectStore(SETTINGS_STORE_NAME, { keyPath: 'id' });
       }
     };
 
@@ -170,6 +189,53 @@ export async function clearRememberedSession(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(SESSION_STORE_NAME, 'readwrite');
     transaction.objectStore(SESSION_STORE_NAME).delete(SESSION_ID);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error('IndexedDB transaction aborted')); };
+  });
+}
+
+export async function getAutoCsvSetting(): Promise<AutoCsvSetting | null> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(SETTINGS_STORE_NAME, 'readonly');
+    const request = transaction.objectStore(SETTINGS_STORE_NAME).get(AUTO_CSV_SETTING_ID);
+    request.onsuccess = () => {
+      const value = request.result as Partial<AutoCsvSetting> | undefined;
+      db.close();
+      if (
+        value?.id === AUTO_CSV_SETTING_ID
+        && value.handle?.kind === 'file'
+        && typeof value.handle.name === 'string'
+        && typeof value.handle.createWritable === 'function'
+      ) {
+        resolve(value as AutoCsvSetting);
+      } else {
+        resolve(null);
+      }
+    };
+    request.onerror = () => { db.close(); reject(request.error); };
+  });
+}
+
+export async function saveAutoCsvSetting(handle: WritableFileHandle, lastSavedAt: string | null): Promise<AutoCsvSetting> {
+  const setting: AutoCsvSetting = { id: AUTO_CSV_SETTING_ID, handle, lastSavedAt };
+  const db = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(SETTINGS_STORE_NAME, 'readwrite');
+    transaction.objectStore(SETTINGS_STORE_NAME).put(setting);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error); };
+    transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error('IndexedDB transaction aborted')); };
+  });
+  return setting;
+}
+
+export async function clearAutoCsvSetting(): Promise<void> {
+  const db = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(SETTINGS_STORE_NAME, 'readwrite');
+    transaction.objectStore(SETTINGS_STORE_NAME).delete(AUTO_CSV_SETTING_ID);
     transaction.oncomplete = () => { db.close(); resolve(); };
     transaction.onerror = () => { db.close(); reject(transaction.error); };
     transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error('IndexedDB transaction aborted')); };

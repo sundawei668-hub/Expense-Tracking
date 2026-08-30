@@ -2,18 +2,23 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AutoCsvSetting,
+  clearAutoCsvSetting,
   clearRememberedSession,
   clearRecords,
+  getAutoCsvSetting,
   getAllRecords,
   getRememberedSession,
   lockDatabase,
   removeRecord,
   replaceRecords,
+  saveAutoCsvSetting,
   saveRememberedSession,
   saveRecord,
   TransactionRecord,
   TransactionType,
   unlockDatabase,
+  WritableFileHandle,
 } from '@/lib/db';
 import {
   createEncryptedBackup,
@@ -26,13 +31,24 @@ import {
   verifyLocalAccount,
   verifyLocalAccountKey,
 } from '@/lib/crypto';
+import { buildRecordsCsv, parseRecordsCsv } from '@/lib/csv';
 
 type Tab = 'add' | 'records' | 'stats' | 'settings';
 type AuthState = 'checking' | 'setup' | 'locked' | 'unlocked';
+type AutoCsvStatus = 'checking' | 'unsupported' | 'off' | 'ready' | 'permission' | 'error';
+type AutoCsvSyncResult = 'saved' | 'off' | 'permission' | 'failed';
 
 interface InstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+}
+
+interface AutoCsvWindow extends Window {
+  showSaveFilePicker?: (options: {
+    suggestedName: string;
+    startIn?: string;
+    types: Array<{ description: string; accept: Record<string, string[]> }>;
+  }) => Promise<WritableFileHandle>;
 }
 
 const expenseCategories = [
@@ -87,6 +103,22 @@ function downloadFile(name: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+async function writeRecordsCsv(handle: WritableFileHandle, records: TransactionRecord[]) {
+  const writable = await handle.createWritable();
+  await writable.write(new Blob([buildRecordsCsv(records)], { type: 'text/csv;charset=utf-8' }));
+  await writable.close();
+}
+
+function savedTimeLabel(value: string | null) {
+  if (!value || Number.isNaN(Date.parse(value))) return '尚未保存';
+  return new Date(value).toLocaleString('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function isValidRecordList(value: unknown): value is TransactionRecord[] {
   if (!Array.isArray(value)) return false;
   const ids = new Set<string>();
@@ -132,9 +164,17 @@ export default function Home() {
   const [restorePassword, setRestorePassword] = useState('');
   const [restoreError, setRestoreError] = useState('');
   const [restoreBusy, setRestoreBusy] = useState(false);
+  const [autoCsvSetting, setAutoCsvSetting] = useState<AutoCsvSetting | null>(null);
+  const [autoCsvStatus, setAutoCsvStatus] = useState<AutoCsvStatus>('checking');
+  const [autoCsvBusy, setAutoCsvBusy] = useState(false);
   const restoreInput = useRef<HTMLInputElement>(null);
+  const csvRestoreInput = useRef<HTMLInputElement>(null);
 
-  const refreshRecords = async () => setRecords(await getAllRecords());
+  const refreshRecords = async () => {
+    const latestRecords = await getAllRecords();
+    setRecords(latestRecords);
+    return latestRecords;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -196,6 +236,32 @@ export default function Home() {
       window.removeEventListener('beforeinstallprompt', onInstallPrompt);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
+  }, [authState]);
+
+  useEffect(() => {
+    if (authState !== 'unlocked') return;
+    let cancelled = false;
+    const loadAutoCsv = async () => {
+      if (typeof (window as AutoCsvWindow).showSaveFilePicker !== 'function') {
+        if (!cancelled) setAutoCsvStatus('unsupported');
+        return;
+      }
+      try {
+        const setting = await getAutoCsvSetting();
+        if (cancelled) return;
+        setAutoCsvSetting(setting);
+        if (!setting) {
+          setAutoCsvStatus('off');
+          return;
+        }
+        const permission = await setting.handle.queryPermission({ mode: 'readwrite' });
+        if (!cancelled) setAutoCsvStatus(permission === 'granted' ? 'ready' : 'permission');
+      } catch {
+        if (!cancelled) setAutoCsvStatus('error');
+      }
+    };
+    void loadAutoCsv();
+    return () => { cancelled = true; };
   }, [authState]);
 
   const showToast = (message: string) => {
@@ -305,6 +371,97 @@ export default function Home() {
     setCategory(nextType === 'expense' ? expenseCategories[0][0] : incomeCategories[0][0]);
   };
 
+  const syncAutoCsv = async (latestRecords: TransactionRecord[]): Promise<AutoCsvSyncResult> => {
+    try {
+      const setting = autoCsvSetting ?? await getAutoCsvSetting();
+      if (!setting) return 'off';
+      setAutoCsvSetting(setting);
+      const permission = await setting.handle.queryPermission({ mode: 'readwrite' });
+      if (permission !== 'granted') {
+        setAutoCsvStatus('permission');
+        return 'permission';
+      }
+      await writeRecordsCsv(setting.handle, latestRecords);
+      const savedSetting = await saveAutoCsvSetting(setting.handle, new Date().toISOString());
+      setAutoCsvSetting(savedSetting);
+      setAutoCsvStatus('ready');
+      return 'saved';
+    } catch {
+      setAutoCsvStatus('error');
+      return 'failed';
+    }
+  };
+
+  const autoCsvToast = (successMessage: string, result: AutoCsvSyncResult) => {
+    showToast(result === 'permission' || result === 'failed'
+      ? `${successMessage}，但自动 CSV 未更新`
+      : successMessage);
+  };
+
+  const chooseAutoCsvFile = async () => {
+    const pickerWindow = window as AutoCsvWindow;
+    if (typeof pickerWindow.showSaveFilePicker !== 'function') {
+      setAutoCsvStatus('unsupported');
+      showToast('当前浏览器不支持固定 CSV 自动保存');
+      return;
+    }
+    setAutoCsvBusy(true);
+    try {
+      const handle = await pickerWindow.showSaveFilePicker({
+        suggestedName: '一本账_自动保存.csv',
+        startIn: 'documents',
+        types: [{ description: 'CSV 表格', accept: { 'text/csv': ['.csv'] } }],
+      });
+      const latestRecords = await getAllRecords();
+      await writeRecordsCsv(handle, latestRecords);
+      const savedSetting = await saveAutoCsvSetting(handle, new Date().toISOString());
+      setAutoCsvSetting(savedSetting);
+      setAutoCsvStatus('ready');
+      showToast('自动 CSV 已开启并完成首次保存');
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      setAutoCsvStatus('error');
+      showToast('自动 CSV 开启失败，请重新选择文件');
+    } finally {
+      setAutoCsvBusy(false);
+    }
+  };
+
+  const authorizeAndSyncAutoCsv = async () => {
+    if (!autoCsvSetting) return;
+    setAutoCsvBusy(true);
+    try {
+      const permission = await autoCsvSetting.handle.requestPermission({ mode: 'readwrite' });
+      if (permission !== 'granted') {
+        setAutoCsvStatus('permission');
+        showToast('未获得 CSV 文件写入权限');
+        return;
+      }
+      const latestRecords = await getAllRecords();
+      const result = await syncAutoCsv(latestRecords);
+      showToast(result === 'saved' ? 'CSV 已更新' : 'CSV 更新失败，请重新选择文件');
+    } catch {
+      setAutoCsvStatus('error');
+      showToast('CSV 更新失败，请重新选择文件');
+    } finally {
+      setAutoCsvBusy(false);
+    }
+  };
+
+  const stopAutoCsv = async () => {
+    setAutoCsvBusy(true);
+    try {
+      await clearAutoCsvSetting();
+      setAutoCsvSetting(null);
+      setAutoCsvStatus('off');
+      showToast('自动 CSV 已关闭，原文件仍保留');
+    } catch {
+      showToast('关闭失败，请稍后重试');
+    } finally {
+      setAutoCsvBusy(false);
+    }
+  };
+
   const submitRecord = async (event: FormEvent) => {
     event.preventDefault();
     const value = Number(amount);
@@ -328,8 +485,9 @@ export default function Home() {
 
     try {
       await saveRecord(record);
-      await refreshRecords();
-      showToast(editingId ? '账单已更新' : '已经记下这笔账');
+      const latestRecords = await refreshRecords();
+      const csvResult = await syncAutoCsv(latestRecords);
+      autoCsvToast(editingId ? '账单已更新' : '已经记下这笔账', csvResult);
       resetForm();
     } catch {
       showToast('保存失败，请稍后重试');
@@ -351,37 +509,40 @@ export default function Home() {
     if (!window.confirm(`确定删除“${record.note || record.category}”这笔账吗？`)) return;
     try {
       await removeRecord(record.id);
-      await refreshRecords();
-      showToast('账单已删除');
+      const latestRecords = await refreshRecords();
+      const csvResult = await syncAutoCsv(latestRecords);
+      autoCsvToast('账单已删除', csvResult);
     } catch {
       showToast('删除失败，请稍后重试');
     }
   };
 
   const exportCsv = async () => {
-    const quote = (value: string | number) => {
-      const text = String(value);
-      const safeText = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text;
-      return `"${safeText.replaceAll('"', '""')}"`;
-    };
-    const header = ['日期', '类型', '金额', '分类', '账户', '备注', '创建时间'];
     try {
       const latestRecords = await getAllRecords();
       setRecords(latestRecords);
-      const rows = latestRecords.map((record) => [
-        record.date,
-        record.type === 'expense' ? '支出' : '收入',
-        record.amount.toFixed(2),
-        record.category,
-        record.account,
-        record.note,
-        record.createdAt,
-      ]);
-      const csv = `\uFEFF${[header, ...rows].map((row) => row.map(quote).join(',')).join('\r\n')}`;
-      downloadFile(`一本账_${localDate()}.csv`, csv, 'text/csv;charset=utf-8');
+      downloadFile(`一本账_${localDate()}.csv`, buildRecordsCsv(latestRecords), 'text/csv;charset=utf-8');
       showToast('CSV 已导出');
     } catch {
       showToast('导出失败，请稍后重试');
+    }
+  };
+
+  const restoreCsv = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      if (file.size > 25 * 1024 * 1024) throw new Error('too-large');
+      const restoredRecords = parseRecordsCsv(await file.text());
+      if (!restoredRecords.length || !isValidRecordList(restoredRecords)) throw new Error('invalid');
+      if (!window.confirm(`CSV 中有 ${restoredRecords.length} 笔账，将覆盖当前账本，是否继续？`)) return;
+      await replaceRecords(restoredRecords);
+      const latestRecords = await refreshRecords();
+      const csvResult = await syncAutoCsv(latestRecords);
+      autoCsvToast('CSV 恢复成功', csvResult);
+    } catch {
+      showToast('CSV 无法恢复，请确认文件来自一本账');
     }
   };
 
@@ -414,8 +575,9 @@ export default function Home() {
       if (legacy.version !== 1 || !isValidRecordList(legacy.records)) throw new Error('invalid');
       if (!window.confirm(`这是旧版明文备份，共 ${legacy.records.length} 笔账。恢复后会自动加密，是否继续？`)) return;
       await replaceRecords(legacy.records);
-      await refreshRecords();
-      showToast('旧版备份已恢复并加密');
+      const latestRecords = await refreshRecords();
+      const csvResult = await syncAutoCsv(latestRecords);
+      autoCsvToast('旧版备份已恢复并加密', csvResult);
     } catch {
       showToast('这不是有效的一本账备份文件');
     }
@@ -431,10 +593,11 @@ export default function Home() {
       if (!isValidRecordList(restoredRecords)) throw new Error('invalid');
       if (!window.confirm(`备份中有 ${restoredRecords.length} 笔账，将覆盖当前账本，是否继续？`)) return;
       await replaceRecords(restoredRecords);
-      await refreshRecords();
+      const latestRecords = await refreshRecords();
+      const csvResult = await syncAutoCsv(latestRecords);
       setPendingBackup(null);
       setRestorePassword('');
-      showToast('加密备份恢复成功');
+      autoCsvToast('加密备份恢复成功', csvResult);
     } catch {
       setRestoreError('密码不正确，或备份文件已经损坏');
     } finally {
@@ -447,8 +610,9 @@ export default function Home() {
     if (!window.confirm('确定清空全部账单吗？清空前建议先导出完整备份。')) return;
     try {
       await clearRecords();
-      await refreshRecords();
-      showToast('账本已清空');
+      const latestRecords = await refreshRecords();
+      const csvResult = await syncAutoCsv(latestRecords);
+      autoCsvToast('账本已清空', csvResult);
     } catch {
       showToast('清空失败，请稍后重试');
     }
@@ -680,9 +844,49 @@ export default function Home() {
               <div className="setting-group">
                 <h3>导出与备份</h3>
                 <button onClick={exportCsv}><span>表</span><div><b>导出 CSV（明文）</b><small>便于 Excel 打开，请勿直接上传公开位置</small></div><em>›</em></button>
+                <button onClick={() => csvRestoreInput.current?.click()}><span>入</span><div><b>从 CSV 恢复</b><small>浏览器数据被清理后，可把自动保存的账目导回来</small></div><em>›</em></button>
+                <input ref={csvRestoreInput} hidden type="file" accept="text/csv,.csv" onChange={restoreCsv} />
                 <button onClick={exportBackup}><span>存</span><div><b>导出加密备份</b><small>可安全保存到百度网盘，恢复时需要密码</small></div><em>›</em></button>
                 <button onClick={() => restoreInput.current?.click()}><span>复</span><div><b>恢复完整备份</b><small>支持加密备份和旧版明文备份</small></div><em>›</em></button>
                 <input ref={restoreInput} hidden type="file" accept="application/json,.json" onChange={restoreBackup} />
+              </div>
+
+              <div className="setting-group">
+                <h3>固定 CSV 自动保存（明文）</h3>
+                <div className={`auto-csv-status ${autoCsvStatus}`}>
+                  <span>{autoCsvStatus === 'ready' ? '✓' : autoCsvStatus === 'unsupported' ? '×' : '表'}</span>
+                  <div>
+                    <b>{autoCsvStatus === 'ready'
+                      ? '自动保存已开启'
+                      : autoCsvStatus === 'unsupported'
+                        ? '当前浏览器不支持'
+                        : autoCsvStatus === 'permission'
+                          ? '需要重新授权文件'
+                          : autoCsvStatus === 'error'
+                            ? '自动保存需要检查'
+                            : autoCsvStatus === 'checking' ? '正在检查…' : '自动保存未开启'}</b>
+                    <p>{autoCsvSetting
+                      ? `${autoCsvSetting.handle.name} · 上次保存 ${savedTimeLabel(autoCsvSetting.lastSavedAt)}`
+                      : autoCsvStatus === 'unsupported'
+                        ? '请使用较新的安卓 Chrome 打开网页'
+                        : '开启后，每次账目变化都会覆盖更新同一个 CSV 文件'}</p>
+                  </div>
+                </div>
+                {autoCsvStatus !== 'unsupported' && (
+                  <button
+                    onClick={autoCsvSetting ? authorizeAndSyncAutoCsv : chooseAutoCsvFile}
+                    disabled={autoCsvBusy || autoCsvStatus === 'checking'}
+                  >
+                    <span>{autoCsvSetting ? '更' : '开'}</span>
+                    <div><b>{autoCsvSetting ? '立即授权并更新 CSV' : '选择 CSV 文件并开启'}</b><small>{autoCsvSetting ? '权限失效时也可点击这里恢复' : '第一次需要选择手机中的保存位置'}</small></div><em>›</em>
+                  </button>
+                )}
+                {autoCsvSetting && (
+                  <>
+                    <button onClick={chooseAutoCsvFile} disabled={autoCsvBusy}><span>换</span><div><b>更换自动保存文件</b><small>选择另一个 CSV 文件作为最新副本</small></div><em>›</em></button>
+                    <button onClick={stopAutoCsv} disabled={autoCsvBusy}><span>停</span><div><b>关闭自动保存</b><small>只取消自动更新，不会删除已经保存的 CSV</small></div><em>›</em></button>
+                  </>
+                )}
               </div>
 
               <div className="setting-group">
@@ -702,7 +906,7 @@ export default function Home() {
                 <h3>账号</h3>
                 <button onClick={logout}><span>退</span><div><b>退出登录</b><small>立即锁定并清除30天免登录</small></div><em>›</em></button>
               </div>
-              <p className="version-note">一本账 1.3 · 本地加密 · 无广告 · 无追踪</p>
+              <p className="version-note">一本账 1.4 · 本地加密 · 自动 CSV · 无广告 · 无追踪</p>
             </section>
           )}
         </div>

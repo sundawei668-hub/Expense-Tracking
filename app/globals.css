@@ -413,6 +413,17 @@ button { color: inherit; }
 .setting-group > button b { font-size: 12px; }
 .setting-group > button small { color: var(--muted); font-size: 9px; }
 .setting-group > button em { color: #a7afa9; font-style: normal; }
+.auto-csv-status { display: flex; align-items: center; gap: 12px; margin: 4px 14px 14px; padding: 13px; border-radius: 14px; background: #f3f2ed; }
+.auto-csv-status > span { display: grid; flex: 0 0 35px; height: 35px; place-items: center; border-radius: 11px; color: var(--muted); background: white; font-size: 12px; font-weight: 900; }
+.auto-csv-status > div { min-width: 0; }
+.auto-csv-status b { display: block; font-size: 11px; }
+.auto-csv-status p { overflow: hidden; margin: 4px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.auto-csv-status.ready { background: var(--green-soft); }
+.auto-csv-status.ready > span { color: var(--green-deep); }
+.auto-csv-status.permission, .auto-csv-status.error { background: #fff3e9; }
+.auto-csv-status.permission > span, .auto-csv-status.error > span { color: #a75d2e; }
+.auto-csv-status.unsupported { background: #fae9e5; }
+.auto-csv-status.unsupported > span { color: #9b3c2e; }
 .danger-zone > button > span { color: #9b3c2e; background: #fae9e5; }
 .danger-zone > button b { color: #9b3c2e; }
 
