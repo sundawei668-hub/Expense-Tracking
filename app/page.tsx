@@ -1,6 +1,6 @@
 'use client';
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AutoCsvSetting,
   clearAutoCsvSetting,
@@ -36,7 +36,7 @@ import { buildRecordsCsv, parseRecordsCsv } from '@/lib/csv';
 type Tab = 'add' | 'records' | 'stats' | 'settings';
 type AuthState = 'checking' | 'setup' | 'locked' | 'unlocked';
 type AutoCsvStatus = 'checking' | 'unsupported' | 'off' | 'ready' | 'permission' | 'error';
-type AutoCsvSyncResult = 'saved' | 'daily-saved' | 'daily-current' | 'off' | 'permission' | 'failed';
+type AutoCsvSyncResult = 'saved' | 'daily-pending' | 'daily-current' | 'off' | 'permission' | 'failed';
 
 interface InstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -176,6 +176,7 @@ export default function Home() {
   const [autoCsvBusy, setAutoCsvBusy] = useState(false);
   const [dailyCsvEnabled, setDailyCsvEnabled] = useState(false);
   const [dailyCsvLastDate, setDailyCsvLastDate] = useState('');
+  const [csvDownloadUrl, setCsvDownloadUrl] = useState('');
   const restoreInput = useRef<HTMLInputElement>(null);
   const csvRestoreInput = useRef<HTMLInputElement>(null);
 
@@ -252,6 +253,16 @@ export default function Home() {
     setDailyCsvEnabled(window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1');
     setDailyCsvLastDate(window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? '');
   }, [authState]);
+
+  useEffect(() => {
+    if (authState !== 'unlocked') {
+      setCsvDownloadUrl('');
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([buildRecordsCsv(records)], { type: 'text/csv;charset=utf-8' }));
+    setCsvDownloadUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [authState, records]);
 
   useEffect(() => {
     if (authState !== 'unlocked') return;
@@ -386,29 +397,23 @@ export default function Home() {
     setCategory(nextType === 'expense' ? expenseCategories[0][0] : incomeCategories[0][0]);
   };
 
-  const downloadDailyCsv = (latestRecords: TransactionRecord[], force = false) => {
-    const today = localDate();
-    const lastDate = window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? dailyCsvLastDate;
-    if (!force && lastDate === today) return false;
-    downloadFile(`一本账每日备份_${today}.csv`, buildRecordsCsv(latestRecords), 'text/csv;charset=utf-8');
-    window.localStorage.setItem(DAILY_CSV_LAST_DATE_KEY, today);
-    setDailyCsvLastDate(today);
-    return true;
-  };
-
   const syncAutoCsv = async (latestRecords: TransactionRecord[]): Promise<AutoCsvSyncResult> => {
     try {
       const setting = autoCsvSetting ?? await getAutoCsvSetting();
       if (!setting) {
         const dailyEnabled = dailyCsvEnabled || window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1';
         if (!dailyEnabled) return 'off';
-        return downloadDailyCsv(latestRecords) ? 'daily-saved' : 'daily-current';
+        const lastDate = window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? dailyCsvLastDate;
+        return lastDate === localDate() ? 'daily-current' : 'daily-pending';
       }
       setAutoCsvSetting(setting);
       const permission = await setting.handle.queryPermission({ mode: 'readwrite' });
       if (permission !== 'granted') {
         const dailyEnabled = dailyCsvEnabled || window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1';
-        if (dailyEnabled) return downloadDailyCsv(latestRecords) ? 'daily-saved' : 'daily-current';
+        if (dailyEnabled) {
+          const lastDate = window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? dailyCsvLastDate;
+          return lastDate === localDate() ? 'daily-current' : 'daily-pending';
+        }
         setAutoCsvStatus('permission');
         return 'permission';
       }
@@ -424,8 +429,8 @@ export default function Home() {
   };
 
   const autoCsvToast = (successMessage: string, result: AutoCsvSyncResult) => {
-    if (result === 'daily-saved') {
-      showToast(`${successMessage}，今天的 CSV 备份已发起下载`);
+    if (result === 'daily-pending') {
+      showToast(`${successMessage}；请到设置点“保存今天 CSV”`);
     } else {
       showToast(result === 'permission' || result === 'failed'
         ? `${successMessage}，但自动 CSV 未更新`
@@ -433,32 +438,27 @@ export default function Home() {
     }
   };
 
-  const enableDailyCsv = async () => {
-    setAutoCsvBusy(true);
-    try {
-      window.localStorage.setItem(DAILY_CSV_ENABLED_KEY, '1');
-      setDailyCsvEnabled(true);
-      const latestRecords = await getAllRecords();
-      downloadDailyCsv(latestRecords, true);
-      showToast('每日 CSV 已开启，今天的备份已发起下载');
-    } catch {
-      showToast('每日 CSV 开启失败，请稍后重试');
-    } finally {
-      setAutoCsvBusy(false);
+  const handleDailyCsvDownload = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (!csvDownloadUrl) {
+      event.preventDefault();
+      showToast('账本还在准备，请稍后再点一次');
+      return;
     }
+    const today = localDate();
+    window.localStorage.setItem(DAILY_CSV_ENABLED_KEY, '1');
+    window.localStorage.setItem(DAILY_CSV_LAST_DATE_KEY, today);
+    setDailyCsvEnabled(true);
+    setDailyCsvLastDate(today);
+    showToast('已交给华为浏览器下载，请立即查看下载管理');
   };
 
-  const downloadTodayCsvAgain = async () => {
-    setAutoCsvBusy(true);
-    try {
-      const latestRecords = await getAllRecords();
-      downloadDailyCsv(latestRecords, true);
-      showToast('今天的 CSV 备份已重新发起下载');
-    } catch {
-      showToast('下载失败，请稍后重试');
-    } finally {
-      setAutoCsvBusy(false);
+  const handleCsvDownload = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (!csvDownloadUrl) {
+      event.preventDefault();
+      showToast('账本还在准备，请稍后再点一次');
+      return;
     }
+    showToast('已交给浏览器下载，请立即查看下载管理');
   };
 
   const disableDailyCsv = () => {
@@ -583,17 +583,6 @@ export default function Home() {
       autoCsvToast('账单已删除', csvResult);
     } catch {
       showToast('删除失败，请稍后重试');
-    }
-  };
-
-  const exportCsv = async () => {
-    try {
-      const latestRecords = await getAllRecords();
-      setRecords(latestRecords);
-      downloadFile(`一本账_${localDate()}.csv`, buildRecordsCsv(latestRecords), 'text/csv;charset=utf-8');
-      showToast('已发起 CSV 下载，请到下载管理查看');
-    } catch {
-      showToast('导出失败，请稍后重试');
     }
   };
 
@@ -912,7 +901,7 @@ export default function Home() {
 
               <div className="setting-group">
                 <h3>导出与备份</h3>
-                <button onClick={exportCsv}><span>表</span><div><b>导出 CSV（明文）</b><small>便于 Excel 打开，请勿直接上传公开位置</small></div><em>›</em></button>
+                <a className="download-action" href={csvDownloadUrl || '#'} download={`一本账_${localDate()}.csv`} onClick={handleCsvDownload}><span>表</span><div><b>导出 CSV（明文）</b><small>直接点击真实下载链接，兼容华为浏览器</small></div><em>›</em></a>
                 <button onClick={() => csvRestoreInput.current?.click()}><span>入</span><div><b>从 CSV 恢复</b><small>浏览器数据被清理后，可把自动保存的账目导回来</small></div><em>›</em></button>
                 <input ref={csvRestoreInput} hidden type="file" accept="text/csv,.csv" onChange={restoreCsv} />
                 <button onClick={exportBackup}><span>存</span><div><b>导出加密备份</b><small>可安全保存到百度网盘，恢复时需要密码</small></div><em>›</em></button>
@@ -959,33 +948,36 @@ export default function Home() {
               </div>
 
               <div className="setting-group">
-                <h3>华为浏览器每日 CSV（明文）</h3>
+                <h3>华为浏览器每日 CSV 提醒（明文）</h3>
                 <div className={`auto-csv-status ${dailyCsvEnabled ? 'ready' : 'off'}`}>
                   <span>{dailyCsvEnabled ? '✓' : '日'}</span>
                   <div>
-                    <b>{dailyCsvEnabled ? '每日备份已开启' : '每日备份未开启'}</b>
+                    <b>{dailyCsvEnabled ? '每日保存提醒已开启' : '每日保存提醒未开启'}</b>
                     <p>{dailyCsvEnabled
                       ? dailyCsvLastDate === localDate()
-                        ? '今天已发起过备份下载；后续修改可手动重新下载'
-                        : '今天尚未备份；第一次新增、修改或删除账目时会自动下载'
-                      : '适合华为浏览器：每天第一次账目变化时下载一个带日期的 CSV'}</p>
+                        ? '今天已点击过下载；请在下载管理中确认文件存在'
+                        : '今天尚未点击保存；记账后会提醒你来这里下载'
+                      : '华为浏览器会拦截自动下载，因此每天提醒你直接点击保存'}</p>
                   </div>
                 </div>
                 <div className="install-tip">
                   <b>文件名：一本账每日备份_日期.csv</b>
-                  <p>网页不能指定华为手机的专用文件夹；请在浏览器“下载管理”中搜索“一本账每日备份”。同一天只自动下载一次。</p>
+                  <p>请直接点击下面的真实下载链接，然后立即到浏览器“下载管理”确认。网页不能指定华为手机的专用文件夹。</p>
                 </div>
-                <button
-                  onClick={dailyCsvEnabled ? downloadTodayCsvAgain : enableDailyCsv}
-                  disabled={autoCsvBusy}
+                <a
+                  className="download-action"
+                  href={csvDownloadUrl || '#'}
+                  download={`一本账每日备份_${localDate()}.csv`}
+                  onClick={handleDailyCsvDownload}
+                  aria-disabled={!csvDownloadUrl}
                 >
                   <span>{dailyCsvEnabled ? '下' : '开'}</span>
                   <div>
-                    <b>{dailyCsvEnabled ? '重新下载今天备份' : '开启每日 CSV 备份'}</b>
-                    <small>{dailyCsvEnabled ? '把今天后续新增或修改的账目也保存进去' : '开启时会立即下载一次今天的完整账本'}</small>
+                    <b>{dailyCsvEnabled ? '保存今天 CSV' : '开启提醒并保存今天 CSV'}</b>
+                    <small>{dailyCsvEnabled ? '直接下载当前完整账本，可重复点击更新' : '首次点击会同时开启每日保存提醒'}</small>
                   </div>
                   <em>›</em>
-                </button>
+                </a>
                 {dailyCsvEnabled && (
                   <button onClick={disableDailyCsv} disabled={autoCsvBusy}><span>停</span><div><b>关闭每日 CSV 备份</b><small>不会删除手机中已经下载的备份文件</small></div><em>›</em></button>
                 )}
@@ -1008,7 +1000,7 @@ export default function Home() {
                 <h3>账号</h3>
                 <button onClick={logout}><span>退</span><div><b>退出登录</b><small>立即锁定并清除30天免登录</small></div><em>›</em></button>
               </div>
-              <p className="version-note">一本账 1.5 · 本地加密 · 每日 CSV · 无广告 · 无追踪</p>
+              <p className="version-note">一本账 1.6 · 本地加密 · 华为 CSV 下载修复 · 无广告 · 无追踪</p>
             </section>
           )}
         </div>

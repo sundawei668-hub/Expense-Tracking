@@ -406,13 +406,14 @@ button { color: inherit; }
 
 .setting-group { margin-top: 22px; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: var(--paper); }
 .setting-group h3 { margin: 0; padding: 14px 16px 9px; color: var(--muted); font-size: 10px; letter-spacing: .06em; }
-.setting-group > button { display: flex; width: 100%; align-items: center; gap: 12px; padding: 13px 16px; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
+.setting-group > button, .setting-group > .download-action { display: flex; width: 100%; align-items: center; gap: 12px; box-sizing: border-box; padding: 13px 16px; border: 0; border-top: 1px solid var(--line); color: inherit; background: transparent; text-align: left; text-decoration: none; cursor: pointer; }
 .setting-group > button:disabled { cursor: not-allowed; opacity: .42; }
-.setting-group > button > span { display: grid; width: 35px; height: 35px; place-items: center; border-radius: 11px; color: var(--green-deep); background: var(--green-soft); font-size: 12px; font-weight: 900; }
-.setting-group > button div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
-.setting-group > button b { font-size: 12px; }
-.setting-group > button small { color: var(--muted); font-size: 9px; }
-.setting-group > button em { color: #a7afa9; font-style: normal; }
+.setting-group > .download-action[aria-disabled="true"] { pointer-events: none; opacity: .42; }
+.setting-group > button > span, .setting-group > .download-action > span { display: grid; width: 35px; height: 35px; place-items: center; border-radius: 11px; color: var(--green-deep); background: var(--green-soft); font-size: 12px; font-weight: 900; }
+.setting-group > button div, .setting-group > .download-action div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.setting-group > button b, .setting-group > .download-action b { font-size: 12px; }
+.setting-group > button small, .setting-group > .download-action small { color: var(--muted); font-size: 9px; }
+.setting-group > button em, .setting-group > .download-action em { color: #a7afa9; font-style: normal; }
 .auto-csv-status { display: flex; align-items: center; gap: 12px; margin: 4px 14px 14px; padding: 13px; border-radius: 14px; background: #f3f2ed; }
 .auto-csv-status > span { display: grid; flex: 0 0 35px; height: 35px; place-items: center; border-radius: 11px; color: var(--muted); background: white; font-size: 12px; font-weight: 900; }
 .auto-csv-status > div { min-width: 0; }
