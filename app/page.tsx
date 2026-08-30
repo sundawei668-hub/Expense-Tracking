@@ -99,8 +99,13 @@ function downloadFile(name: string, content: string, type: string) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = name;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => {
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, 60_000);
 }
 
 async function writeRecordsCsv(handle: WritableFileHandle, records: TransactionRecord[]) {
@@ -522,7 +527,7 @@ export default function Home() {
       const latestRecords = await getAllRecords();
       setRecords(latestRecords);
       downloadFile(`一本账_${localDate()}.csv`, buildRecordsCsv(latestRecords), 'text/csv;charset=utf-8');
-      showToast('CSV 已导出');
+      showToast('已发起 CSV 下载，请到下载管理查看');
     } catch {
       showToast('导出失败，请稍后重试');
     }
@@ -552,7 +557,7 @@ export default function Home() {
       setRecords(latestRecords);
       const backup = await createEncryptedBackup(latestRecords);
       downloadFile(`一本账加密备份_${localDate()}.json`, JSON.stringify(backup, null, 2), 'application/json');
-      showToast('加密备份已导出');
+      showToast('已发起加密备份下载，请到下载管理查看');
     } catch {
       showToast('备份失败，请稍后重试');
     }
