@@ -36,7 +36,7 @@ import { buildRecordsCsv, parseRecordsCsv } from '@/lib/csv';
 type Tab = 'add' | 'records' | 'stats' | 'settings';
 type AuthState = 'checking' | 'setup' | 'locked' | 'unlocked';
 type AutoCsvStatus = 'checking' | 'unsupported' | 'off' | 'ready' | 'permission' | 'error';
-type AutoCsvSyncResult = 'saved' | 'off' | 'permission' | 'failed';
+type AutoCsvSyncResult = 'saved' | 'daily-saved' | 'daily-current' | 'off' | 'permission' | 'failed';
 
 interface InstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -62,6 +62,8 @@ const incomeCategories = [
 
 const accounts = ['微信支付', '支付宝', '银行卡', '现金', '信用卡'];
 const REMEMBER_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
+const DAILY_CSV_ENABLED_KEY = 'yi-ben-zhang-daily-csv-enabled';
+const DAILY_CSV_LAST_DATE_KEY = 'yi-ben-zhang-daily-csv-last-date';
 
 const categoryIcon = new Map<string, string>([...expenseCategories, ...incomeCategories]);
 
@@ -172,6 +174,8 @@ export default function Home() {
   const [autoCsvSetting, setAutoCsvSetting] = useState<AutoCsvSetting | null>(null);
   const [autoCsvStatus, setAutoCsvStatus] = useState<AutoCsvStatus>('checking');
   const [autoCsvBusy, setAutoCsvBusy] = useState(false);
+  const [dailyCsvEnabled, setDailyCsvEnabled] = useState(false);
+  const [dailyCsvLastDate, setDailyCsvLastDate] = useState('');
   const restoreInput = useRef<HTMLInputElement>(null);
   const csvRestoreInput = useRef<HTMLInputElement>(null);
 
@@ -241,6 +245,12 @@ export default function Home() {
       window.removeEventListener('beforeinstallprompt', onInstallPrompt);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
+  }, [authState]);
+
+  useEffect(() => {
+    if (authState !== 'unlocked') return;
+    setDailyCsvEnabled(window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1');
+    setDailyCsvLastDate(window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? '');
   }, [authState]);
 
   useEffect(() => {
@@ -376,13 +386,29 @@ export default function Home() {
     setCategory(nextType === 'expense' ? expenseCategories[0][0] : incomeCategories[0][0]);
   };
 
+  const downloadDailyCsv = (latestRecords: TransactionRecord[], force = false) => {
+    const today = localDate();
+    const lastDate = window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? dailyCsvLastDate;
+    if (!force && lastDate === today) return false;
+    downloadFile(`一本账每日备份_${today}.csv`, buildRecordsCsv(latestRecords), 'text/csv;charset=utf-8');
+    window.localStorage.setItem(DAILY_CSV_LAST_DATE_KEY, today);
+    setDailyCsvLastDate(today);
+    return true;
+  };
+
   const syncAutoCsv = async (latestRecords: TransactionRecord[]): Promise<AutoCsvSyncResult> => {
     try {
       const setting = autoCsvSetting ?? await getAutoCsvSetting();
-      if (!setting) return 'off';
+      if (!setting) {
+        const dailyEnabled = dailyCsvEnabled || window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1';
+        if (!dailyEnabled) return 'off';
+        return downloadDailyCsv(latestRecords) ? 'daily-saved' : 'daily-current';
+      }
       setAutoCsvSetting(setting);
       const permission = await setting.handle.queryPermission({ mode: 'readwrite' });
       if (permission !== 'granted') {
+        const dailyEnabled = dailyCsvEnabled || window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1';
+        if (dailyEnabled) return downloadDailyCsv(latestRecords) ? 'daily-saved' : 'daily-current';
         setAutoCsvStatus('permission');
         return 'permission';
       }
@@ -398,9 +424,47 @@ export default function Home() {
   };
 
   const autoCsvToast = (successMessage: string, result: AutoCsvSyncResult) => {
-    showToast(result === 'permission' || result === 'failed'
-      ? `${successMessage}，但自动 CSV 未更新`
-      : successMessage);
+    if (result === 'daily-saved') {
+      showToast(`${successMessage}，今天的 CSV 备份已发起下载`);
+    } else {
+      showToast(result === 'permission' || result === 'failed'
+        ? `${successMessage}，但自动 CSV 未更新`
+        : successMessage);
+    }
+  };
+
+  const enableDailyCsv = async () => {
+    setAutoCsvBusy(true);
+    try {
+      window.localStorage.setItem(DAILY_CSV_ENABLED_KEY, '1');
+      setDailyCsvEnabled(true);
+      const latestRecords = await getAllRecords();
+      downloadDailyCsv(latestRecords, true);
+      showToast('每日 CSV 已开启，今天的备份已发起下载');
+    } catch {
+      showToast('每日 CSV 开启失败，请稍后重试');
+    } finally {
+      setAutoCsvBusy(false);
+    }
+  };
+
+  const downloadTodayCsvAgain = async () => {
+    setAutoCsvBusy(true);
+    try {
+      const latestRecords = await getAllRecords();
+      downloadDailyCsv(latestRecords, true);
+      showToast('今天的 CSV 备份已重新发起下载');
+    } catch {
+      showToast('下载失败，请稍后重试');
+    } finally {
+      setAutoCsvBusy(false);
+    }
+  };
+
+  const disableDailyCsv = () => {
+    window.localStorage.removeItem(DAILY_CSV_ENABLED_KEY);
+    setDailyCsvEnabled(false);
+    showToast('每日 CSV 自动备份已关闭');
   };
 
   const chooseAutoCsvFile = async () => {
@@ -895,6 +959,39 @@ export default function Home() {
               </div>
 
               <div className="setting-group">
+                <h3>华为浏览器每日 CSV（明文）</h3>
+                <div className={`auto-csv-status ${dailyCsvEnabled ? 'ready' : 'off'}`}>
+                  <span>{dailyCsvEnabled ? '✓' : '日'}</span>
+                  <div>
+                    <b>{dailyCsvEnabled ? '每日备份已开启' : '每日备份未开启'}</b>
+                    <p>{dailyCsvEnabled
+                      ? dailyCsvLastDate === localDate()
+                        ? '今天已发起过备份下载；后续修改可手动重新下载'
+                        : '今天尚未备份；第一次新增、修改或删除账目时会自动下载'
+                      : '适合华为浏览器：每天第一次账目变化时下载一个带日期的 CSV'}</p>
+                  </div>
+                </div>
+                <div className="install-tip">
+                  <b>文件名：一本账每日备份_日期.csv</b>
+                  <p>网页不能指定华为手机的专用文件夹；请在浏览器“下载管理”中搜索“一本账每日备份”。同一天只自动下载一次。</p>
+                </div>
+                <button
+                  onClick={dailyCsvEnabled ? downloadTodayCsvAgain : enableDailyCsv}
+                  disabled={autoCsvBusy}
+                >
+                  <span>{dailyCsvEnabled ? '下' : '开'}</span>
+                  <div>
+                    <b>{dailyCsvEnabled ? '重新下载今天备份' : '开启每日 CSV 备份'}</b>
+                    <small>{dailyCsvEnabled ? '把今天后续新增或修改的账目也保存进去' : '开启时会立即下载一次今天的完整账本'}</small>
+                  </div>
+                  <em>›</em>
+                </button>
+                {dailyCsvEnabled && (
+                  <button onClick={disableDailyCsv} disabled={autoCsvBusy}><span>停</span><div><b>关闭每日 CSV 备份</b><small>不会删除手机中已经下载的备份文件</small></div><em>›</em></button>
+                )}
+              </div>
+
+              <div className="setting-group">
                 <h3>手机使用</h3>
                 {installPrompt ? (
                   <button onClick={installApp}><span>＋</span><div><b>添加到手机桌面</b><small>像普通 App 一样快速打开</small></div><em>›</em></button>
@@ -911,7 +1008,7 @@ export default function Home() {
                 <h3>账号</h3>
                 <button onClick={logout}><span>退</span><div><b>退出登录</b><small>立即锁定并清除30天免登录</small></div><em>›</em></button>
               </div>
-              <p className="version-note">一本账 1.4 · 本地加密 · 自动 CSV · 无广告 · 无追踪</p>
+              <p className="version-note">一本账 1.5 · 本地加密 · 每日 CSV · 无广告 · 无追踪</p>
             </section>
           )}
         </div>
