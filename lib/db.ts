@@ -15,6 +15,7 @@ export interface TransactionRecord {
   type: TransactionType;
   amount: number;
   category: string;
+  categoryGroup?: string;
   account: string;
   note: string;
   createdAt: string;

@@ -1,6 +1,6 @@
 import { TransactionRecord } from './db';
 
-const CSV_HEADERS = ['日期', '类型', '金额', '分类', '账户', '备注', '创建时间', '记录ID', '更新时间'] as const;
+const CSV_HEADERS = ['日期', '类型', '金额', '分类', '账户', '备注', '创建时间', '记录ID', '更新时间', '大类'] as const;
 
 function quoteCsvCell(value: string | number) {
   const text = String(value);
@@ -19,6 +19,7 @@ export function buildRecordsCsv(records: TransactionRecord[]) {
     record.createdAt,
     record.id,
     record.updatedAt ?? '',
+    record.categoryGroup ?? '',
   ]);
   return `\uFEFF${[CSV_HEADERS, ...rows].map((row) => row.map(quoteCsvCell).join(',')).join('\r\n')}`;
 }
@@ -94,6 +95,7 @@ export function parseRecordsCsv(source: string): TransactionRecord[] {
     createdAt: column('创建时间'),
     id: column('记录ID', false),
     updatedAt: column('更新时间', false),
+    categoryGroup: column('大类', false),
   };
 
   const ids = new Set<string>();
@@ -106,6 +108,7 @@ export function parseRecordsCsv(source: string): TransactionRecord[] {
       : rawType === '收入' || rawType === 'income' ? 'income' : null;
     const amount = Number(get(indexes.amount).replaceAll(',', ''));
     const category = restoreFormulaSafeText(get(indexes.category));
+    const categoryGroup = restoreFormulaSafeText(get(indexes.categoryGroup));
     const account = restoreFormulaSafeText(get(indexes.account));
     const note = restoreFormulaSafeText(get(indexes.note));
     const createdAtValue = get(indexes.createdAt);
@@ -124,6 +127,7 @@ export function parseRecordsCsv(source: string): TransactionRecord[] {
       type,
       amount: Math.round(amount * 100) / 100,
       category,
+      ...(categoryGroup ? { categoryGroup } : {}),
       account,
       note,
       createdAt: validIsoDateTime(createdAtValue) ? createdAtValue : new Date().toISOString(),

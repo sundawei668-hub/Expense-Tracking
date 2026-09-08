@@ -1,4 +1,5 @@
 import type { TransactionRecord } from './db';
+import { CategoryGroup, isCategoryCatalog } from './categories';
 
 const ACCOUNT_STORAGE_KEY = 'yibenzhang-local-account-v2';
 const ACCOUNT_VERSION = 2;
@@ -200,12 +201,12 @@ export async function decryptStoredRecord(record: EncryptedStoredRecord): Promis
   return parsed;
 }
 
-export async function createEncryptedBackup(records: TransactionRecord[]): Promise<EncryptedBackupFile> {
+export async function createEncryptedBackup(records: TransactionRecord[], categories?: CategoryGroup[]): Promise<EncryptedBackupFile> {
   const config = getLocalAccount();
   if (!config) throw new Error('找不到本地账户');
   const payload = await encryptText(
     requireEncryptionKey(),
-    JSON.stringify({ records }),
+    JSON.stringify({ records, ...(categories ? { categories } : {}) }),
     BACKUP_AAD,
   );
   return {
@@ -238,9 +239,14 @@ export function isEncryptedBackupFile(value: unknown): value is EncryptedBackupF
 }
 
 export async function decryptEncryptedBackup(backup: EncryptedBackupFile, password: string) {
+  return (await decryptEncryptedBackupContents(backup, password)).records;
+}
+
+export async function decryptEncryptedBackupContents(backup: EncryptedBackupFile, password: string) {
   const key = await deriveKey(password, base64ToBytes(backup.account.salt), backup.account.iterations);
   const plaintext = await decryptText(key, backup.payload, BACKUP_AAD);
-  const parsed = JSON.parse(plaintext) as { records?: TransactionRecord[] };
+  const parsed = JSON.parse(plaintext) as { records?: TransactionRecord[]; categories?: CategoryGroup[] };
   if (!Array.isArray(parsed.records)) throw new Error('备份内容无效');
-  return parsed.records;
+  if (parsed.categories !== undefined && !isCategoryCatalog(parsed.categories)) throw new Error('备份分类设置无效');
+  return { records: parsed.records, categories: parsed.categories };
 }

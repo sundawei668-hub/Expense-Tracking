@@ -23,7 +23,7 @@ import {
 import {
   createEncryptedBackup,
   createLocalAccount,
-  decryptEncryptedBackup,
+  decryptEncryptedBackupContents,
   EncryptedBackupFile,
   getLocalAccount,
   isEncryptedBackupFile,
@@ -32,11 +32,26 @@ import {
   verifyLocalAccountKey,
 } from '@/lib/crypto';
 import { buildRecordsCsv, parseRecordsCsv } from '@/lib/csv';
+import { CategoryGroup, DEFAULT_CATEGORY_GROUPS, categoryCaption, categoryIconName, persistCategoryCatalog, readCategoryCatalog, recordCategoryGroup, remapCategorySelection, totalByCategory, visibleCategorySelection } from '@/lib/categories';
+import CategoryPanel from './category-panel';
+import CategoryIcon from './category-icon';
+import CategoryDetail from './category-detail';
 
 type Tab = 'add' | 'records' | 'stats' | 'settings';
 type AuthState = 'checking' | 'setup' | 'locked' | 'unlocked';
 type AutoCsvStatus = 'checking' | 'unsupported' | 'off' | 'ready' | 'permission' | 'error';
-type AutoCsvSyncResult = 'saved' | 'daily-pending' | 'daily-current' | 'off' | 'permission' | 'failed';
+type AutoCsvSyncResult = 'saved' | 'native-saved' | 'daily-pending' | 'daily-current' | 'off' | 'permission' | 'failed';
+
+interface NativeAndroidBridge {
+  saveCsv: (fileName: string, content: string) => string;
+  saveFile: (fileName: string, content: string, mimeType: string) => string;
+}
+
+declare global {
+  interface Window {
+    AndroidLedger?: NativeAndroidBridge;
+  }
+}
 
 interface InstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -51,21 +66,10 @@ interface AutoCsvWindow extends Window {
   }) => Promise<WritableFileHandle>;
 }
 
-const expenseCategories = [
-  ['餐饮', '🥢'], ['交通', '🚇'], ['购物', '🛍'], ['居家', '⌂'],
-  ['娱乐', '♪'], ['医疗', '✚'], ['教育', '书'], ['子女', '子'], ['其他', '•••'],
-] as const;
-
-const incomeCategories = [
-  ['工资', '薪'], ['奖金', '奖'], ['理财', '↗'], ['报销', '票'], ['兼职', '工'], ['其他', '•••'],
-] as const;
-
 const accounts = ['微信支付', '支付宝', '银行卡', '现金', '信用卡'];
 const REMEMBER_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const DAILY_CSV_ENABLED_KEY = 'yi-ben-zhang-daily-csv-enabled';
 const DAILY_CSV_LAST_DATE_KEY = 'yi-ben-zhang-daily-csv-last-date';
-
-const categoryIcon = new Map<string, string>([...expenseCategories, ...incomeCategories]);
 
 function localDate(date = new Date()) {
   const year = date.getFullYear();
@@ -96,6 +100,12 @@ function dateLabel(value: string) {
 }
 
 function downloadFile(name: string, content: string, type: string) {
+  const nativeBridge = getNativeAndroidBridge();
+  if (nativeBridge) {
+    const result = nativeBridge.saveFile(name, content, type);
+    if (!result.startsWith('OK|')) throw new Error(result || 'native-save-failed');
+    return;
+  }
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -108,6 +118,19 @@ function downloadFile(name: string, content: string, type: string) {
     anchor.remove();
     URL.revokeObjectURL(url);
   }, 60_000);
+}
+
+function getNativeAndroidBridge() {
+  if (typeof window === 'undefined' || typeof window.AndroidLedger?.saveCsv !== 'function') return null;
+  return window.AndroidLedger;
+}
+
+function saveNativeCsv(records: TransactionRecord[], fileName = `一本账每日备份_${localDate()}.csv`) {
+  const bridge = getNativeAndroidBridge();
+  if (!bridge) throw new Error('native-bridge-unavailable');
+  const result = bridge.saveCsv(fileName, buildRecordsCsv(records));
+  if (!result.startsWith('OK|')) throw new Error(result || 'native-save-failed');
+  return result.slice(3);
 }
 
 async function writeRecordsCsv(handle: WritableFileHandle, records: TransactionRecord[]) {
@@ -139,6 +162,7 @@ function isValidRecordList(value: unknown): value is TransactionRecord[] {
       && (item.type === 'expense' || item.type === 'income')
       && Number.isFinite(item.amount) && Number(item.amount) > 0
       && typeof item.category === 'string' && item.category.length > 0
+      && (item.categoryGroup === undefined || (typeof item.categoryGroup === 'string' && item.categoryGroup.length > 0 && item.categoryGroup.length <= 24))
       && typeof item.account === 'string' && item.account.length > 0
       && typeof item.note === 'string'
       && typeof item.createdAt === 'string' && !Number.isNaN(Date.parse(item.createdAt))
@@ -160,6 +184,11 @@ export default function Home() {
   const [type, setType] = useState<TransactionType>('expense');
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('餐饮');
+  const [categoryGroup, setCategoryGroup] = useState<string | undefined>();
+  const [catalog, setCatalog] = useState<CategoryGroup[]>(DEFAULT_CATEGORY_GROUPS);
+  const [catalogWritable, setCatalogWritable] = useState(false);
+  const [categoryPage, setCategoryPage] = useState<{ view: 'pick' | 'manage'; group?: string } | null>(null);
+  const [statsGroup, setStatsGroup] = useState<string | null>(null);
   const [account, setAccount] = useState(accounts[0]);
   const [note, setNote] = useState('');
   const [date, setDate] = useState(localDate());
@@ -177,8 +206,18 @@ export default function Home() {
   const [dailyCsvEnabled, setDailyCsvEnabled] = useState(false);
   const [dailyCsvLastDate, setDailyCsvLastDate] = useState('');
   const [csvDownloadUrl, setCsvDownloadUrl] = useState('');
+  const [nativeAndroid, setNativeAndroid] = useState(false);
+  const [nativeCsvPath, setNativeCsvPath] = useState('Download/一本账');
   const restoreInput = useRef<HTMLInputElement>(null);
   const csvRestoreInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingId || !catalogWritable) return;
+    const next = visibleCategorySelection(catalog, type, { category, categoryGroup });
+    if (next.category !== category || next.categoryGroup !== categoryGroup) {
+      setCategory(next.category); setCategoryGroup(next.categoryGroup);
+    }
+  }, [catalog, type, category, categoryGroup, editingId, catalogWritable]);
 
   const refreshRecords = async () => {
     const latestRecords = await getAllRecords();
@@ -226,7 +265,7 @@ export default function Home() {
       .catch(() => showToast('本地账本读取失败，请刷新重试'))
       .finally(() => setReady(true));
 
-    if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
+    if (!getNativeAndroidBridge() && 'serviceWorker' in navigator && window.location.protocol === 'https:') {
       const serviceWorkerPath = new URL('sw.js', document.baseURI).pathname;
       navigator.serviceWorker.register(serviceWorkerPath).catch(() => undefined);
     }
@@ -250,6 +289,9 @@ export default function Home() {
 
   useEffect(() => {
     if (authState !== 'unlocked') return;
+    setNativeAndroid(Boolean(getNativeAndroidBridge()));
+    try { setCatalog(readCategoryCatalog()); setCatalogWritable(true); }
+    catch { setCatalogWritable(false); showToast('分类设置读取失败，请刷新后重试；已有账单仍可查看'); }
     setDailyCsvEnabled(window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1');
     setDailyCsvLastDate(window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? '');
   }, [authState]);
@@ -372,18 +414,24 @@ export default function Home() {
     const term = search.trim().toLowerCase();
     return records.filter((record) => {
       const monthMatches = !month || record.date.startsWith(month);
-      const searchable = `${record.category} ${record.account} ${record.note}`.toLowerCase();
+      const searchable = `${categoryCaption(record)} ${record.account} ${record.note}`.toLowerCase();
       return monthMatches && (!term || searchable.includes(term));
     });
   }, [records, month, search]);
 
   const categoryTotals = useMemo(() => {
-    const totals = new Map<string, number>();
-    monthRecords
-      .filter((record) => record.type === 'expense')
-      .forEach((record) => totals.set(record.category, (totals.get(record.category) ?? 0) + record.amount));
-    return [...totals.entries()].sort((a, b) => b[1] - a[1]);
+    return totalByCategory(monthRecords);
   }, [monthRecords]);
+
+  const updateCatalog = (next: CategoryGroup[]) => {
+    if (!catalogWritable) throw new Error('分类设置尚未成功读取，请刷新后重试');
+    persistCategoryCatalog(next);
+    if (!editingId) {
+      const selection = remapCategorySelection(catalog, next, type, { category, categoryGroup });
+      setCategory(selection.category); setCategoryGroup(selection.categoryGroup);
+    }
+    setCatalog(next);
+  };
 
   const resetForm = () => {
     setAmount('');
@@ -393,15 +441,26 @@ export default function Home() {
   };
 
   const changeType = (nextType: TransactionType) => {
+    if (nextType === type) return;
     setType(nextType);
-    setCategory(nextType === 'expense' ? expenseCategories[0][0] : incomeCategories[0][0]);
+    const first = catalog.find((g) => g.type === nextType && !g.hidden);
+    setCategory(first?.name ?? (nextType === 'expense' ? '餐饮' : '工资'));
+    setCategoryGroup(first?.name);
   };
 
   const syncAutoCsv = async (latestRecords: TransactionRecord[]): Promise<AutoCsvSyncResult> => {
     try {
+      const dailyEnabled = dailyCsvEnabled || window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1';
+      if (getNativeAndroidBridge() && dailyEnabled) {
+        const savedPath = saveNativeCsv(latestRecords);
+        const today = localDate();
+        window.localStorage.setItem(DAILY_CSV_LAST_DATE_KEY, today);
+        setDailyCsvLastDate(today);
+        setNativeCsvPath(savedPath);
+        return 'native-saved';
+      }
       const setting = autoCsvSetting ?? await getAutoCsvSetting();
       if (!setting) {
-        const dailyEnabled = dailyCsvEnabled || window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1';
         if (!dailyEnabled) return 'off';
         const lastDate = window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? dailyCsvLastDate;
         return lastDate === localDate() ? 'daily-current' : 'daily-pending';
@@ -409,7 +468,6 @@ export default function Home() {
       setAutoCsvSetting(setting);
       const permission = await setting.handle.queryPermission({ mode: 'readwrite' });
       if (permission !== 'granted') {
-        const dailyEnabled = dailyCsvEnabled || window.localStorage.getItem(DAILY_CSV_ENABLED_KEY) === '1';
         if (dailyEnabled) {
           const lastDate = window.localStorage.getItem(DAILY_CSV_LAST_DATE_KEY) ?? dailyCsvLastDate;
           return lastDate === localDate() ? 'daily-current' : 'daily-pending';
@@ -429,7 +487,9 @@ export default function Home() {
   };
 
   const autoCsvToast = (successMessage: string, result: AutoCsvSyncResult) => {
-    if (result === 'daily-pending') {
+    if (result === 'native-saved') {
+      showToast(`${successMessage}，CSV 已自动更新`);
+    } else if (result === 'daily-pending') {
       showToast(`${successMessage}；请到设置点“保存今天 CSV”`);
     } else {
       showToast(result === 'permission' || result === 'failed'
@@ -439,6 +499,22 @@ export default function Home() {
   };
 
   const handleDailyCsvDownload = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (getNativeAndroidBridge()) {
+      event.preventDefault();
+      try {
+        const savedPath = saveNativeCsv(records);
+        const today = localDate();
+        window.localStorage.setItem(DAILY_CSV_ENABLED_KEY, '1');
+        window.localStorage.setItem(DAILY_CSV_LAST_DATE_KEY, today);
+        setDailyCsvEnabled(true);
+        setDailyCsvLastDate(today);
+        setNativeCsvPath(savedPath);
+        showToast(`CSV 已保存到 ${savedPath}`);
+      } catch {
+        showToast('安卓文件保存失败，请检查存储权限');
+      }
+      return;
+    }
     if (!csvDownloadUrl) {
       event.preventDefault();
       showToast('账本还在准备，请稍后再点一次');
@@ -453,6 +529,17 @@ export default function Home() {
   };
 
   const handleCsvDownload = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (getNativeAndroidBridge()) {
+      event.preventDefault();
+      try {
+        const savedPath = saveNativeCsv(records, `一本账_${localDate()}.csv`);
+        setNativeCsvPath(savedPath);
+        showToast(`CSV 已保存到 ${savedPath}`);
+      } catch {
+        showToast('安卓文件保存失败，请检查存储权限');
+      }
+      return;
+    }
     if (!csvDownloadUrl) {
       event.preventDefault();
       showToast('账本还在准备，请稍后再点一次');
@@ -546,6 +633,7 @@ export default function Home() {
       type,
       amount: Math.round(value * 100) / 100,
       category,
+      ...(categoryGroup ? { categoryGroup } : {}),
       account,
       note: note.trim(),
       createdAt: existing?.createdAt ?? new Date().toISOString(),
@@ -568,6 +656,7 @@ export default function Home() {
     setType(record.type);
     setAmount(String(record.amount));
     setCategory(record.category);
+    setCategoryGroup(record.categoryGroup);
     setAccount(record.account);
     setNote(record.note);
     setDate(record.date);
@@ -608,7 +697,7 @@ export default function Home() {
     try {
       const latestRecords = await getAllRecords();
       setRecords(latestRecords);
-      const backup = await createEncryptedBackup(latestRecords);
+      const backup = await createEncryptedBackup(latestRecords, catalogWritable ? catalog : undefined);
       downloadFile(`一本账加密备份_${localDate()}.json`, JSON.stringify(backup, null, 2), 'application/json');
       showToast('已发起加密备份下载，请到下载管理查看');
     } catch {
@@ -647,15 +736,22 @@ export default function Home() {
     setRestoreBusy(true);
     setRestoreError('');
     try {
-      const restoredRecords = await decryptEncryptedBackup(pendingBackup, restorePassword);
+      const restored = await decryptEncryptedBackupContents(pendingBackup, restorePassword);
+      const restoredRecords = restored.records;
       if (!isValidRecordList(restoredRecords)) throw new Error('invalid');
       if (!window.confirm(`备份中有 ${restoredRecords.length} 笔账，将覆盖当前账本，是否继续？`)) return;
       await replaceRecords(restoredRecords);
+      let categoryRestoreFailed = false;
+      if (restored.categories) {
+        try { persistCategoryCatalog(restored.categories); setCatalog(restored.categories); setCatalogWritable(true); }
+        catch { categoryRestoreFailed = true; }
+      }
       const latestRecords = await refreshRecords();
       const csvResult = await syncAutoCsv(latestRecords);
       setPendingBackup(null);
       setRestorePassword('');
-      autoCsvToast('加密备份恢复成功', csvResult);
+      if (categoryRestoreFailed) showToast('账单已恢复，但分类设置保存失败；请保留备份并重试');
+      else autoCsvToast('加密备份恢复成功', csvResult);
     } catch {
       setRestoreError('密码不正确，或备份文件已经损坏');
     } finally {
@@ -684,7 +780,7 @@ export default function Home() {
     setInstallPrompt(null);
   };
 
-  const categories = type === 'expense' ? expenseCategories : incomeCategories;
+  const categories = catalog.filter((group) => group.type === type && !group.hidden);
   const maximumCategory = categoryTotals[0]?.[1] ?? 1;
 
   if (authState === 'checking') {
@@ -794,17 +890,22 @@ export default function Home() {
                   />
                 </label>
 
-                <div className="categories" aria-label="选择分类">
-                  {categories.map(([name, icon]) => (
+                <button type="button" className="selected-category" onClick={() => setCategoryPage({ view: 'pick' })} aria-haspopup="dialog">
+                  <CategoryIcon name={categoryIconName(catalog, type, { category, categoryGroup })} />
+                  <span><small>当前分类</small><b>{categoryCaption({ category, categoryGroup })}</b></span><em>选择分类 ›</em>
+                </button>
+                <div className="categories category-shortcuts" aria-label="分类快捷入口">
+                  {categories.slice(0, 7).map((group) => (
                     <button
                       type="button"
-                      key={name}
-                      className={category === name ? 'category active' : 'category'}
-                      onClick={() => setCategory(name)}
+                      key={group.id}
+                      className={recordCategoryGroup({ category, categoryGroup }) === group.name ? 'category active' : 'category'}
+                      onClick={() => setCategoryPage({ view: 'pick', group: group.name })}
                     >
-                      <span className={name === '其他' ? 'more-dots' : undefined}>{icon}</span>{name}
+                      <CategoryIcon name={group.icon} />{group.name}
                     </button>
                   ))}
+                  <button type="button" className="category" onClick={() => setCategoryPage({ view: 'pick' })}><CategoryIcon name="other" />全部分类</button>
                 </div>
 
                 <div className="entry-details">
@@ -851,10 +952,10 @@ export default function Home() {
                 <div className="record-list">
                   {filteredRecords.map((record) => (
                     <article className="record-item" key={record.id}>
-                      <div className={`record-icon ${record.type}`}>{categoryIcon.get(record.category) ?? '•'}</div>
+                      <CategoryIcon className={`record-icon ${record.type}`} name={categoryIconName(catalog, record.type, record)} />
                       <div className="record-copy">
                         <strong>{record.note || record.category}</strong>
-                        <span>{dateLabel(record.date)} · {record.category} · {record.account}</span>
+                        <span>{dateLabel(record.date)} · {categoryCaption(record)} · {record.account}</span>
                       </div>
                       <div className="record-actions">
                         <b className={record.type}>{record.type === 'expense' ? '-' : '+'}¥{money(record.amount)}</b>
@@ -883,10 +984,10 @@ export default function Home() {
                 {categoryTotals.length === 0 ? (
                   <div className="empty-state compact"><span>◎</span><p>本月还没有支出数据</p></div>
                 ) : categoryTotals.map(([name, total]) => (
-                  <div className="bar-row" key={name}>
-                    <span className="bar-icon">{categoryIcon.get(name) ?? '•'}</span>
-                    <div><p><b>{name}</b><em>¥{money(total)}</em></p><i><span style={{ width: `${Math.max(7, (total / maximumCategory) * 100)}%` }} /></i></div>
-                  </div>
+                  <button className="bar-row category-stat-link" key={name} onClick={() => setStatsGroup(name)} aria-label={`查看${name}子分类统计`}>
+                    <CategoryIcon name={categoryIconName(catalog, 'expense', { category: name })} />
+                    <div><p><b>{name}</b><em>¥{money(total)} ›</em></p><i><span style={{ width: `${Math.max(7, (total / maximumCategory) * 100)}%` }} /></i></div>
+                  </button>
                 ))}
               </div>
             </section>
@@ -900,8 +1001,13 @@ export default function Home() {
               </div>
 
               <div className="setting-group">
+                <h3>记账偏好</h3>
+                <button onClick={() => setCategoryPage({ view: 'manage' })}><CategoryIcon name="shopping" /><div><b>自定义分类与管理</b><small>新增、改名、删除大类和子分类</small></div><em>›</em></button>
+              </div>
+
+              <div className="setting-group">
                 <h3>导出与备份</h3>
-                <a className="download-action" href={csvDownloadUrl || '#'} download={`一本账_${localDate()}.csv`} onClick={handleCsvDownload}><span>表</span><div><b>导出 CSV（明文）</b><small>直接点击真实下载链接，兼容华为浏览器</small></div><em>›</em></a>
+                <a className="download-action" href={nativeAndroid ? '#' : csvDownloadUrl || '#'} download={`一本账_${localDate()}.csv`} onClick={handleCsvDownload}><span>表</span><div><b>导出 CSV（明文）</b><small>{nativeAndroid ? `直接保存到 ${nativeCsvPath}` : '直接点击真实下载链接，兼容华为浏览器'}</small></div><em>›</em></a>
                 <button onClick={() => csvRestoreInput.current?.click()}><span>入</span><div><b>从 CSV 恢复</b><small>浏览器数据被清理后，可把自动保存的账目导回来</small></div><em>›</em></button>
                 <input ref={csvRestoreInput} hidden type="file" accept="text/csv,.csv" onChange={restoreCsv} />
                 <button onClick={exportBackup}><span>存</span><div><b>导出加密备份</b><small>可安全保存到百度网盘，恢复时需要密码</small></div><em>›</em></button>
@@ -909,7 +1015,7 @@ export default function Home() {
                 <input ref={restoreInput} hidden type="file" accept="application/json,.json" onChange={restoreBackup} />
               </div>
 
-              <div className="setting-group">
+              {!nativeAndroid && <div className="setting-group">
                 <h3>固定 CSV 自动保存（明文）</h3>
                 <div className={`auto-csv-status ${autoCsvStatus}`}>
                   <span>{autoCsvStatus === 'ready' ? '✓' : autoCsvStatus === 'unsupported' ? '×' : '表'}</span>
@@ -945,36 +1051,48 @@ export default function Home() {
                     <button onClick={stopAutoCsv} disabled={autoCsvBusy}><span>停</span><div><b>关闭自动保存</b><small>只取消自动更新，不会删除已经保存的 CSV</small></div><em>›</em></button>
                   </>
                 )}
-              </div>
+              </div>}
 
               <div className="setting-group">
-                <h3>华为浏览器每日 CSV 提醒（明文）</h3>
+                <h3>{nativeAndroid ? '安卓 App 每日 CSV（自动）' : '华为浏览器每日 CSV 提醒（明文）'}</h3>
                 <div className={`auto-csv-status ${dailyCsvEnabled ? 'ready' : 'off'}`}>
                   <span>{dailyCsvEnabled ? '✓' : '日'}</span>
                   <div>
-                    <b>{dailyCsvEnabled ? '每日保存提醒已开启' : '每日保存提醒未开启'}</b>
-                    <p>{dailyCsvEnabled
-                      ? dailyCsvLastDate === localDate()
-                        ? '今天已点击过下载；请在下载管理中确认文件存在'
-                        : '今天尚未点击保存；记账后会提醒你来这里下载'
-                      : '华为浏览器会拦截自动下载，因此每天提醒你直接点击保存'}</p>
+                    <b>{nativeAndroid
+                      ? dailyCsvEnabled ? '安卓自动备份已开启' : '安卓自动备份未开启'
+                      : dailyCsvEnabled ? '每日保存提醒已开启' : '每日保存提醒未开启'}</b>
+                    <p>{nativeAndroid
+                      ? dailyCsvEnabled
+                        ? `同一天每次账目变化都会覆盖更新 · ${dailyCsvLastDate || '尚未保存'}`
+                        : '开启后自动保存，不需要弹出下载页面'
+                      : dailyCsvEnabled
+                        ? dailyCsvLastDate === localDate()
+                          ? '今天已点击过下载；请在下载管理中确认文件存在'
+                          : '今天尚未点击保存；记账后会提醒你来这里下载'
+                        : '华为浏览器会拦截自动下载，因此每天提醒你直接点击保存'}</p>
                   </div>
                 </div>
                 <div className="install-tip">
                   <b>文件名：一本账每日备份_日期.csv</b>
-                  <p>请直接点击下面的真实下载链接，然后立即到浏览器“下载管理”确认。网页不能指定华为手机的专用文件夹。</p>
+                  <p>{nativeAndroid
+                    ? `保存目录：${nativeCsvPath}。同一天始终覆盖同一个文件。`
+                    : '请直接点击下面的真实下载链接，然后立即到浏览器“下载管理”确认。网页不能指定华为手机的专用文件夹。'}</p>
                 </div>
                 <a
                   className="download-action"
-                  href={csvDownloadUrl || '#'}
+                  href={nativeAndroid ? '#' : csvDownloadUrl || '#'}
                   download={`一本账每日备份_${localDate()}.csv`}
                   onClick={handleDailyCsvDownload}
-                  aria-disabled={!csvDownloadUrl}
+                  aria-disabled={!nativeAndroid && !csvDownloadUrl}
                 >
                   <span>{dailyCsvEnabled ? '下' : '开'}</span>
                   <div>
-                    <b>{dailyCsvEnabled ? '保存今天 CSV' : '开启提醒并保存今天 CSV'}</b>
-                    <small>{dailyCsvEnabled ? '直接下载当前完整账本，可重复点击更新' : '首次点击会同时开启每日保存提醒'}</small>
+                    <b>{nativeAndroid
+                      ? dailyCsvEnabled ? '立即更新今天 CSV' : '开启安卓自动备份'
+                      : dailyCsvEnabled ? '保存今天 CSV' : '开启提醒并保存今天 CSV'}</b>
+                    <small>{nativeAndroid
+                      ? dailyCsvEnabled ? '现在覆盖更新当天完整账本' : '开启后每次账目变化都会自动更新'
+                      : dailyCsvEnabled ? '直接下载当前完整账本，可重复点击更新' : '首次点击会同时开启每日保存提醒'}</small>
                   </div>
                   <em>›</em>
                 </a>
@@ -983,7 +1101,7 @@ export default function Home() {
                 )}
               </div>
 
-              <div className="setting-group">
+              {!nativeAndroid && <div className="setting-group">
                 <h3>手机使用</h3>
                 {installPrompt ? (
                   <button onClick={installApp}><span>＋</span><div><b>添加到手机桌面</b><small>像普通 App 一样快速打开</small></div><em>›</em></button>
@@ -991,7 +1109,7 @@ export default function Home() {
                   <div className="install-tip"><b>添加到桌面</b><p>在手机浏览器菜单中选择“添加到主屏幕”或“安装应用”。</p></div>
                 )}
                 <div className="install-tip"><b>华为手机需要重新发送到桌面</b><p>新版桌面图标会在华为浏览器窗口中打开，才能正常弹出 CSV 下载。请删除旧图标，再从浏览器重新“发送到桌面”；删除图标不会删除账目。</p></div>
-              </div>
+              </div>}
 
               <div className="setting-group danger-zone">
                 <h3>账本管理</h3>
@@ -1001,7 +1119,7 @@ export default function Home() {
                 <h3>账号</h3>
                 <button onClick={logout}><span>退</span><div><b>退出登录</b><small>立即锁定并清除30天免登录</small></div><em>›</em></button>
               </div>
-              <p className="version-note">一本账 1.7 · 本地加密 · 桌面入口支持下载 · 无广告 · 无追踪</p>
+              <p className="version-note">{nativeAndroid ? '一本账 APK 1.0 测试版 · 原生 CSV 自动保存' : '一本账 1.9 · 多级分类 · 本地加密 · 无广告 · 无追踪'}</p>
             </section>
           )}
         </div>
@@ -1014,6 +1132,9 @@ export default function Home() {
         </nav>
         {toast && <div className="toast" role="status">{toast}</div>}
       </section>
+
+      {categoryPage && <CategoryPanel initialView={categoryPage.view} initialGroup={categoryPage.group} type={type} selected={{ category, categoryGroup }} catalog={catalog} records={records} onChange={updateCatalog} onSelect={(selected) => { setCategory(selected.category); setCategoryGroup(selected.categoryGroup); }} onClose={() => setCategoryPage(null)} />}
+      {statsGroup && <CategoryDetail group={statsGroup} month={month} records={monthRecords} onClose={() => setStatsGroup(null)} onEdit={editRecord} />}
 
       {pendingBackup && (
         <div className="restore-overlay" role="dialog" aria-modal="true" aria-labelledby="restore-title">
