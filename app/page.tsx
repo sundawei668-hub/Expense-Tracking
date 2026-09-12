@@ -210,6 +210,27 @@ export default function Home() {
   const [nativeCsvPath, setNativeCsvPath] = useState('Download/一本账');
   const restoreInput = useRef<HTMLInputElement>(null);
   const csvRestoreInput = useRef<HTMLInputElement>(null);
+  const migrationWindow = useRef<Window | null>(null);
+
+  useEffect(() => {
+    const receive = (event: MessageEvent) => {
+      if (event.origin !== 'https://yibenzhang-david.sundawei668.chatgpt.site'
+        || !migrationWindow.current || event.source !== migrationWindow.current) return;
+      if (event.data?.type === 'ledger-cloud-ready') {
+        migrationWindow.current.postMessage({ type: 'ledger-migration', data: { records, catalog } }, event.origin);
+      } else if (event.data?.type === 'ledger-cloud-imported') {
+        showToast(`云端已确认迁入 ${event.data.count} 笔，原有账目仍保留`);
+      }
+    };
+    window.addEventListener('message', receive);
+    return () => window.removeEventListener('message', receive);
+  }, [records, catalog]);
+
+  const migrateToCloud = () => {
+    if (!window.confirm(`将当前 ${records.length} 笔账目和分类发送到一本账云端页面？登录后还需要选择目标账本并确认保存。`)) return;
+    migrationWindow.current = window.open('https://yibenzhang-david.sundawei668.chatgpt.site/', 'ledger-cloud-migration');
+    if (!migrationWindow.current) showToast('请允许浏览器打开新页面后重试');
+  };
 
   useEffect(() => {
     if (editingId || !catalogWritable) return;
@@ -853,6 +874,8 @@ export default function Home() {
             </div>
             <button className="avatar" aria-label="进入设置" onClick={() => setTab('settings')}>账</button>
           </header>
+
+          <div className="install-tip"><b>云端版已上线</b><p>使用账号密码登录，支持个人与家庭账本。</p><button onClick={migrateToCloud} disabled={!ready || !catalogWritable}>迁移到云端（保留原有账目）</button></div>
 
           {tab === 'add' && (
             <>
